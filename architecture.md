@@ -7,7 +7,7 @@ This document is the living architectural record for **Engram**, a local-first h
 **Repository:** https://github.com/yoyoerx/engram
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
-**Status:** Phase 7 Complete + operational hardening
+**Status:** Phase 7 Complete + operational hardening + OQ-7 resolved
 **Last Updated:** 2026-05-12
 
 ---
@@ -418,7 +418,6 @@ engram/
 │   ├── start.py                 # Cold-start: docker compose up -d, check/start Ollama, health check
 │   ├── session_start.py         # SessionStart hook — fires on every Claude Code session open
 │   ├── stop_hook.py             # Stop hook — nudges store_memory after 15+ min idle, per response
-│   ├── pre_compact.py           # PreCompact hook — warns if no recent store_memory before compaction
 │   ├── smoke_retrieve.py        # Quick retrieval sanity check
 │   └── benchmark.py             # Latency benchmark — reports p50/p95/p99 for retrieve_context
 │
@@ -499,10 +498,9 @@ engram/
 **Limitation:** Docker Desktop itself (the GUI app on Windows) cannot be started programmatically from a hook; it must be running before the session opens. The hook handles everything downstream of that.
 **Trade-off:** Adds ~2–5 seconds to session startup when services are cold. Negligible when services are already running.
 
-### ADR-015: PreCompact hook as a memory safety reminder
-**Decision:** Wire PreCompact hooks (both `auto` and `manual` matchers) that run `scripts/pre_compact.py`, which checks memory recency and emits a `systemMessage` warning before context compaction.
-**Rationale:** Context compaction discards detailed conversation history. If important decisions or feedback from a session have not been stored, that context is lost permanently. The hook provides a last-chance visible reminder by checking Qdrant for the most recent `store_memory` timestamp and warning if it was more than 60 minutes ago.
-**Limitation:** PreCompact `command` hooks receive session metadata only — not conversation content. The hook cannot automatically extract and save memories; it can only warn. The primary save-before-compact mechanism is the proactive CLAUDE.md instructions (ADR-010). A fully automatic save would require `agent`-type hooks, which are not supported on PreCompact events (only on PreToolUse/PostToolUse/PermissionRequest).
+### ADR-015: PreCompact hook removed
+**Decision:** PreCompact hook (`scripts/pre_compact.py`) was wired in an earlier iteration and has been removed from `~/.claude/settings.json`.
+**Rationale:** PreCompact `command` hooks fire and complete before Claude has a response turn. The `systemMessage` output is consumed as part of the compaction input — there is no opportunity for Claude to call `store_memory` in response before the compaction completes. In practice the hook ran, printed a warning, and the warning was immediately folded into the summary with no effect. The Stop hook (ADR-014 / `stop_hook.py`) already provides proactive nudging after every response while Claude still has an action window; that is the correct mechanism. The PreCompact script (`scripts/pre_compact.py`) is retained in the repo for reference but is no longer wired.
 
 ---
 
@@ -552,7 +550,7 @@ All 6 Engram tools should also be added to `permissions.allow` in `~/.claude/set
 
 ### Claude Code Hooks (`~/.claude/settings.json`)
 
-Two hooks are wired for automatic Engram lifecycle management:
+Two hooks are wired for automatic Engram lifecycle management (a third, PreCompact, was removed — see ADR-015):
 
 **SessionStart** — fires every time Claude Code opens a session:
 ```json
@@ -582,18 +580,7 @@ Two hooks are wired for automatic Engram lifecycle management:
 ```
 `stop_hook.py` checks minutes since the last `store_memory` call and emits a `systemMessage` nudge: mild reminder at 15–30 min idle, strong warning beyond 30 min. Silent when Qdrant is unreachable or a recent store already happened (<15 min).
 
-**PreCompact** — fires before Claude Code compacts the context window (both auto and manual):
-```json
-{
-  "hooks": {
-    "PreCompact": [
-      { "matcher": "auto",   "hooks": [{ "type": "command", "command": "python ...\\pre_compact.py", "timeout": 10 }] },
-      { "matcher": "manual", "hooks": [{ "type": "command", "command": "python ...\\pre_compact.py", "timeout": 10 }] }
-    ]
-  }
-}
-```
-`pre_compact.py` queries Qdrant for the most recent memory timestamp and outputs a `systemMessage` warning if more than 60 minutes have elapsed since the last `store_memory` call. **Note:** PreCompact command hooks receive session metadata only — not conversation content — so the script cannot save memories automatically; it reminds and warns (see ADR-014).
+The PreCompact hook was removed (see ADR-015). The Stop hook handles idle-time nudging while Claude still has an action window.
 
 ### CLAUDE.md — Memory Routing and Proactive Behavior
 `~/.claude/CLAUDE.md` contains global instructions that control Claude's memory behavior across all sessions:
@@ -673,9 +660,10 @@ Two hooks are wired for automatic Engram lifecycle management:
 - [x] `scripts/start.py` — idempotent cold-start; starts Docker Compose services, checks/starts Ollama, runs health check. Flags: `--wait`, `--health-only`.
 - [x] `scripts/session_start.py` — SessionStart hook; fires automatically on every Claude Code session open, starts services, outputs status banner (ADR-014).
 - [x] `scripts/stop_hook.py` — Stop hook; fires after every response, nudges `store_memory` if >15 min idle, stronger warning if >30 min.
-- [x] `scripts/pre_compact.py` — PreCompact hook; checks recency of last `store_memory` and warns if >60 min idle before compaction fires (ADR-015).
+- [x] `scripts/pre_compact.py` — PreCompact hook; script retained in repo but **removed from settings.json** (ADR-015: fires with no action window for Claude to respond before compaction completes).
 - [x] `~/.claude/CLAUDE.md` — strengthened: `retrieve_context` at session start is mandatory; `store_memory` after task completions and at pause points; "err on the side of storing" documented.
-- [x] `~/.claude/settings.json` — SessionStart and PreCompact (auto + manual) hooks configured.
+- [x] `~/.claude/settings.json` — SessionStart and Stop hooks configured.
+- [x] `list_memories` tombstone filter fixed (OQ-7) — `FieldCondition` was guarded by `if False` debug artifact; tombstoned memories now correctly excluded from list output.
 
 ---
 
