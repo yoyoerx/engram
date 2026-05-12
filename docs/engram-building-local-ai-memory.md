@@ -144,6 +144,6 @@ The AI Amnesia problem is solvable. The tools exist, they're free, and they run 
 
 ---
 
-*The full architecture document for Engram lives in `architecture.md` at the project root.*
+*The full architecture document and source code for Engram are at [github.com/yoyoerx/engram](https://github.com/yoyoerx/engram).*
 
 **Tags:** AI, Claude, RAG, Neo4j, Qdrant, MCP, Local AI, Developer Tools, Knowledge Graph
