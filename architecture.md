@@ -7,7 +7,7 @@ This document is the living architectural record for **Engram**, a local-first h
 **Repository:** https://github.com/yoyoerx/engram
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
-**Status:** Phase 7 Complete
+**Status:** Phase 7 Complete + operational hardening
 **Last Updated:** 2026-05-12
 
 ---
@@ -414,7 +414,10 @@ engram/
 ├── scripts/                     # Utility scripts
 │   ├── init_db.py               # Apply Neo4j constraints + create Qdrant collection
 │   ├── migrate.py               # Import from flat-file memory/*.md directory
-│   ├── health_check.py          # Verify all four services are running
+│   ├── health_check.py          # Verify all services are reachable; exits 1 if any down
+│   ├── start.py                 # Cold-start: docker compose up -d, check/start Ollama, health check
+│   ├── session_start.py         # SessionStart hook — fires on every Claude Code session open
+│   ├── pre_compact.py           # PreCompact hook — warns if no recent store_memory before compaction
 │   ├── smoke_retrieve.py        # Quick retrieval sanity check
 │   └── benchmark.py             # Latency benchmark — reports p50/p95/p99 for retrieve_context
 │
@@ -485,8 +488,20 @@ engram/
 **Trade-off:** No rollback for the reverse scenario (Qdrant succeeds, Neo4j `vector_id` update fails). This leaves a vector without a `vector_id` in Neo4j, which is a minor inconsistency — graph traversal still works, only the cross-reference pointer is missing.
 
 ### ADR-010: CLAUDE.md for proactive memory routing
-**Decision:** Use `~/.claude/CLAUDE.md` to instruct Claude Code to route all memory through Engram instead of the flat-file system.
-**Rationale:** Claude Code's auto-memory behavior is controlled by system-prompt instructions. By placing global instructions in `CLAUDE.md`, we redirect `store_memory` / `retrieve_context` calls without modifying the Claude Code codebase. All 6 Engram MCP tools are also added to `permissions.allow` in `settings.json` to suppress per-call permission prompts.
+**Decision:** Use `~/.claude/CLAUDE.md` to instruct Claude Code to route all memory through Engram instead of the flat-file system, and to behave proactively about saving and recalling memories.
+**Rationale:** Claude Code's behavior is controlled by system-prompt instructions in CLAUDE.md. By placing global instructions there, we redirect memory operations and enforce proactive patterns (session-start retrieve_context, save-after-task, err-on-store) without modifying Claude Code itself. All 6 Engram MCP tools are added to `permissions.allow` in `settings.json` to suppress per-call permission prompts.
+**Key instructions in CLAUDE.md:** (1) call `retrieve_context` at the start of every session before doing any work; (2) call `store_memory` immediately on feedback, decisions, task completions, bug patterns — do not wait to be asked; (3) at natural pause points scan for unsaved context and store it; (4) Windows encoding guards.
+
+### ADR-014: SessionStart hook for zero-touch service startup
+**Decision:** Wire a `SessionStart` hook in `~/.claude/settings.json` that runs `scripts/session_start.py` on every Claude Code session open.
+**Rationale:** Engram requires three services (Qdrant, Neo4j, Ollama) before any MCP tool call can succeed. Without the hook, the user must manually start services before opening Claude Code. The SessionStart hook eliminates this step — Docker Compose containers start (or are verified running), Ollama is checked and started if needed, and a status banner appears in the session. Docker containers use `restart: unless-stopped`, so if Docker Desktop is already running the compose-up call completes in ~1 second.
+**Limitation:** Docker Desktop itself (the GUI app on Windows) cannot be started programmatically from a hook; it must be running before the session opens. The hook handles everything downstream of that.
+**Trade-off:** Adds ~2–5 seconds to session startup when services are cold. Negligible when services are already running.
+
+### ADR-015: PreCompact hook as a memory safety reminder
+**Decision:** Wire PreCompact hooks (both `auto` and `manual` matchers) that run `scripts/pre_compact.py`, which checks memory recency and emits a `systemMessage` warning before context compaction.
+**Rationale:** Context compaction discards detailed conversation history. If important decisions or feedback from a session have not been stored, that context is lost permanently. The hook provides a last-chance visible reminder by checking Qdrant for the most recent `store_memory` timestamp and warning if it was more than 60 minutes ago.
+**Limitation:** PreCompact `command` hooks receive session metadata only — not conversation content. The hook cannot automatically extract and save memories; it can only warn. The primary save-before-compact mechanism is the proactive CLAUDE.md instructions (ADR-010). A fully automatic save would require `agent`-type hooks, which are not supported on PreCompact events (only on PreToolUse/PostToolUse/PermissionRequest).
 
 ---
 
@@ -534,11 +549,46 @@ All 6 Engram tools should also be added to `permissions.allow` in `~/.claude/set
 }
 ```
 
-### CLAUDE.md Memory Routing
-`~/.claude/CLAUDE.md` contains global instructions that redirect Claude Code's memory system to use Engram MCP tools instead of writing flat `.md` files. It also defines proactive memory rules (save on feedback, user facts, decisions, bug patterns) and Windows encoding guards (see §12).
+### Claude Code Hooks (`~/.claude/settings.json`)
+
+Two hooks are wired for automatic Engram lifecycle management:
+
+**SessionStart** — fires every time Claude Code opens a session:
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{ "type": "command",
+                  "command": "python C:\\Users\\Kevin\\Projects\\engram\\scripts\\session_start.py",
+                  "timeout": 30 }]
+    }]
+  }
+}
+```
+`session_start.py` runs `docker compose up -d`, checks Qdrant and Ollama reachability, starts Ollama if not running, and outputs a `systemMessage` banner (`[Engram] ready -- ...`). Completes in under 5 seconds when services are already up.
+
+**PreCompact** — fires before Claude Code compacts the context window (both auto and manual):
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      { "matcher": "auto",   "hooks": [{ "type": "command", "command": "python ...\\pre_compact.py", "timeout": 10 }] },
+      { "matcher": "manual", "hooks": [{ "type": "command", "command": "python ...\\pre_compact.py", "timeout": 10 }] }
+    ]
+  }
+}
+```
+`pre_compact.py` queries Qdrant for the most recent memory timestamp and outputs a `systemMessage` warning if more than 60 minutes have elapsed since the last `store_memory` call. **Note:** PreCompact command hooks receive session metadata only — not conversation content — so the script cannot save memories automatically; it reminds and warns (see ADR-014).
+
+### CLAUDE.md — Memory Routing and Proactive Behavior
+`~/.claude/CLAUDE.md` contains global instructions that control Claude's memory behavior across all sessions:
+- **Session start**: always call `retrieve_context` before doing any work, to load relevant prior context.
+- **Proactive saving**: store memories immediately when feedback, decisions, bug patterns, or task completions occur — without waiting to be asked. Err on the side of storing; a redundant memory costs little, a missed one is permanent.
+- **Memory routing**: use Engram MCP tools exclusively; do not write `.md` files to the flat-file memory directory.
+- **Windows encoding guard**: ASCII-only stdout, `encoding="utf-8"` on all file I/O (see §12).
 
 ### Service Health Check
-`scripts/health_check.py` verifies all four services are reachable before the MCP server starts. MCP server startup fails fast with a clear error if any dependency is down.
+`scripts/health_check.py` verifies all services are reachable (Qdrant, Neo4j, Ollama). Used by `start.py` and callable directly. Exits with code 1 if any service is down.
 
 ---
 
@@ -599,6 +649,13 @@ All 6 Engram tools should also be added to `permissions.allow` in `~/.claude/set
 - [x] Rollback unit tests — `tests/test_store_rollback.py` (3 tests, no live services)
 - [x] Benchmark script — `scripts/benchmark.py` reports p50/p95/p99 for `retrieve_context` (run with `--queries 20`)
 - [ ] Performance baseline — run `scripts/benchmark.py` against live services and record numbers here
+
+### Operational Hardening (post-Phase 7) ✅
+- [x] `scripts/start.py` — idempotent cold-start; starts Docker Compose services, checks/starts Ollama, runs health check. Flags: `--wait`, `--health-only`.
+- [x] `scripts/session_start.py` — SessionStart hook; fires automatically on every Claude Code session open, starts services, outputs status banner (ADR-014).
+- [x] `scripts/pre_compact.py` — PreCompact hook; checks recency of last `store_memory` and warns if >60 min idle before compaction fires (ADR-015).
+- [x] `~/.claude/CLAUDE.md` — strengthened: `retrieve_context` at session start is mandatory; `store_memory` after task completions and at pause points; "err on the side of storing" documented.
+- [x] `~/.claude/settings.json` — SessionStart and PreCompact (auto + manual) hooks configured.
 
 ---
 
