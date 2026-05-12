@@ -717,7 +717,7 @@ Post-migration: Claude Code can be configured to prefer `retrieve_context` over 
 | OQ-4 | Should `retrieve_context` return raw chunks or synthesized summaries? | **Resolved — raw chunks.** Synthesis is left to the calling LLM. |
 | OQ-5 | How should the 60/40 vector/graph weight be calibrated? Manual tuning or learned? | **Resolved — manual v1** (tunable in `config.py`). ML calibration deferred to v2. |
 | OQ-6 | Should Neo4j entities be deduplicated by canonical name, or is entity disambiguation needed? | **Resolved — name-based dedup for v1.** `MERGE` on `toLower(name)` in Cypher. |
-| OQ-7 | What's the right tombstone filtering strategy for list_memories vs retrieve_context? | Open — currently `list_memories` does not filter tombstoned records (known gap). |
+| OQ-7 | What's the right tombstone filtering strategy for list_memories vs retrieve_context? | **Resolved** — `list_memories` now filters tombstoned records (same as `retrieve_context`). Bug was `if False` guard on the tombstone `FieldCondition` in `manage.py`. |
 
 ---
 

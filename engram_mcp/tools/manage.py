@@ -132,7 +132,7 @@ async def list_memories(
     ] = 50,
 ) -> list[dict]:
     """List stored memories with optional filters."""
-    must = [FieldCondition(key="tombstone", match=MatchValue(value=False))] if False else []
+    must = [FieldCondition(key="tombstone", match=MatchValue(value=False))]
 
     if memory_type:
         must.append(FieldCondition(key="memory_type", match=MatchValue(value=memory_type)))
