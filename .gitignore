@@ -4,6 +4,9 @@
 # Local Claude Code settings (machine-specific)
 .claude/
 
+# Article drafts (not for public repo)
+docs/
+
 # Python
 __pycache__/
 *.py[cod]
