@@ -417,6 +417,7 @@ engram/
 │   ├── health_check.py          # Verify all services are reachable; exits 1 if any down
 │   ├── start.py                 # Cold-start: docker compose up -d, check/start Ollama, health check
 │   ├── session_start.py         # SessionStart hook — fires on every Claude Code session open
+│   ├── stop_hook.py             # Stop hook — nudges store_memory after 15+ min idle, per response
 │   ├── pre_compact.py           # PreCompact hook — warns if no recent store_memory before compaction
 │   ├── smoke_retrieve.py        # Quick retrieval sanity check
 │   └── benchmark.py             # Latency benchmark — reports p50/p95/p99 for retrieve_context
@@ -567,6 +568,20 @@ Two hooks are wired for automatic Engram lifecycle management:
 ```
 `session_start.py` runs `docker compose up -d`, checks Qdrant and Ollama reachability, starts Ollama if not running, and outputs a `systemMessage` banner (`[Engram] ready -- ...`). Completes in under 5 seconds when services are already up.
 
+**Stop** — fires after every Claude Code response:
+```json
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{ "type": "command",
+                  "command": "python C:\\Users\\Kevin\\Projects\\engram\\scripts\\stop_hook.py",
+                  "timeout": 10 }]
+    }]
+  }
+}
+```
+`stop_hook.py` checks minutes since the last `store_memory` call and emits a `systemMessage` nudge: mild reminder at 15–30 min idle, strong warning beyond 30 min. Silent when Qdrant is unreachable or a recent store already happened (<15 min).
+
 **PreCompact** — fires before Claude Code compacts the context window (both auto and manual):
 ```json
 {
@@ -657,6 +672,7 @@ Two hooks are wired for automatic Engram lifecycle management:
 ### Operational Hardening (post-Phase 7) ✅
 - [x] `scripts/start.py` — idempotent cold-start; starts Docker Compose services, checks/starts Ollama, runs health check. Flags: `--wait`, `--health-only`.
 - [x] `scripts/session_start.py` — SessionStart hook; fires automatically on every Claude Code session open, starts services, outputs status banner (ADR-014).
+- [x] `scripts/stop_hook.py` — Stop hook; fires after every response, nudges `store_memory` if >15 min idle, stronger warning if >30 min.
 - [x] `scripts/pre_compact.py` — PreCompact hook; checks recency of last `store_memory` and warns if >60 min idle before compaction fires (ADR-015).
 - [x] `~/.claude/CLAUDE.md` — strengthened: `retrieve_context` at session start is mandatory; `store_memory` after task completions and at pause points; "err on the side of storing" documented.
 - [x] `~/.claude/settings.json` — SessionStart and PreCompact (auto + manual) hooks configured.
