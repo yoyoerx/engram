@@ -4,6 +4,7 @@
 
 This document is the living architectural record for **Engram**, a local-first hybrid memory backend for Claude Code (and eventually any LLM). It evolves alongside the project. Major decisions are recorded here with their rationale so future contributors — human and AI alike — understand not just *what* was built but *why*.
 
+**Repository:** https://github.com/yoyoerx/engram
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
 **Status:** MVP Complete

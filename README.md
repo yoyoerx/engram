@@ -61,7 +61,7 @@ Install these manually before running the installer:
 ## Installation
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/yoyoerx/engram.git
 cd engram
 python scripts/install.py
 ```
@@ -222,4 +222,4 @@ See [architecture.md](architecture.md) for the full design document including sy
 
 ## License
 
-MIT
+[BSD-3-Clause](LICENSE)
