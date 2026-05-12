@@ -3,6 +3,7 @@
 import json
 import anthropic
 from engram_mcp.config import ANTHROPIC_API_KEY, EXTRACT_MODEL
+from engram_mcp.retry import call_with_retry_sync
 
 _client = None
 
@@ -50,11 +51,15 @@ def extract(chunk: str) -> dict:
     Falls back to empty result on any error to keep ingestion non-blocking.
     """
     try:
-        message = _get_client().messages.create(
+        message = call_with_retry_sync(
+            _get_client().messages.create,
             model=EXTRACT_MODEL,
             max_tokens=1024,
             system=_SYSTEM,
             messages=[{"role": "user", "content": _USER_TMPL.format(chunk=chunk)}],
+            max_attempts=3,
+            base_delay=1.0,
+            backoff=2.0,
         )
         raw = message.content[0].text.strip()
         # Strip accidental markdown fences

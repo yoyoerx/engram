@@ -7,12 +7,11 @@ from typing import Annotated
 from pydantic import Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, FieldCondition, Filter, MatchValue, MatchAny
-from neo4j import GraphDatabase
-
 from engram_mcp.config import (
     MEMORY_TYPES, QDRANT_URL, QDRANT_COLLECTION,
     NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD,
 )
+from engram_mcp.retry import neo4j_driver as _neo4j_driver
 from engram_mcp.ingest.chunker import chunk
 from engram_mcp.ingest.embedder import embed
 from engram_mcp.ingest.extractor import extract
@@ -27,7 +26,6 @@ async def update_memory(
     ] = None,
 ) -> dict:
     """Update an existing memory chunk. Tombstones the old chunk and creates a SUPERSEDES edge."""
-    neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     qdrant = QdrantClient(url=QDRANT_URL)
 
     # Fetch old chunk's metadata from Qdrant
@@ -35,21 +33,12 @@ async def update_memory(
         collection_name=QDRANT_COLLECTION, ids=[chunk_id], with_payload=True
     )
     if not old_points:
-        neo4j_driver.close()
         return {"updated": False, "error": f"chunk_id '{chunk_id}' not found."}
 
     old_payload = old_points[0].payload or {}
     memory_type = old_payload.get("memory_type", "feedback")
     project = old_payload.get("project")
 
-    # Tombstone old node in Neo4j
-    with neo4j_driver.session() as session:
-        session.run(
-            "MATCH (m:Memory {chunk_id: $cid}) SET m.tombstone = true",
-            cid=chunk_id,
-        )
-
-    # Store new chunk via the ingestion pipeline
     new_chunk_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
     extracted = extract(content)
@@ -68,27 +57,31 @@ async def update_memory(
         points=[PointStruct(id=new_chunk_id, vector=vector, payload=new_payload)],
     )
 
-    with neo4j_driver.session() as session:
-        session.run(
-            """
-            MERGE (m:Memory {chunk_id: $cid})
-            SET m.content = $content, m.memory_type = $type,
-                m.project = $project, m.timestamp = $ts, m.tombstone = false
-            """,
-            cid=new_chunk_id, content=content, type=memory_type,
-            project=project, ts=timestamp,
-        )
-        # SUPERSEDES relationship
-        session.run(
-            """
-            MATCH (new:Memory {chunk_id: $new_id})
-            MATCH (old:Memory {chunk_id: $old_id})
-            MERGE (new)-[:SUPERSEDES]->(old)
-            """,
-            new_id=new_chunk_id, old_id=chunk_id,
-        )
+    with _neo4j_driver(NEO4J_URI, (NEO4J_USER, NEO4J_PASSWORD)) as driver:
+        with driver.session() as session:
+            session.run(
+                "MATCH (m:Memory {chunk_id: $cid}) SET m.tombstone = true",
+                cid=chunk_id,
+            )
+        with driver.session() as session:
+            session.run(
+                """
+                MERGE (m:Memory {chunk_id: $cid})
+                SET m.content = $content, m.memory_type = $type,
+                    m.project = $project, m.timestamp = $ts, m.tombstone = false
+                """,
+                cid=new_chunk_id, content=content, type=memory_type,
+                project=project, ts=timestamp,
+            )
+            session.run(
+                """
+                MATCH (new:Memory {chunk_id: $new_id})
+                MATCH (old:Memory {chunk_id: $old_id})
+                MERGE (new)-[:SUPERSEDES]->(old)
+                """,
+                new_id=new_chunk_id, old_id=chunk_id,
+            )
 
-    neo4j_driver.close()
     return {"updated": True, "old_chunk_id": chunk_id, "new_chunk_id": new_chunk_id}
 
 
@@ -100,7 +93,6 @@ async def forget(
     ] = False,
 ) -> dict:
     """Soft-delete (tombstone) or hard-delete a memory chunk."""
-    neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     qdrant = QdrantClient(url=QDRANT_URL)
 
     if hard:
@@ -108,20 +100,20 @@ async def forget(
             collection_name=QDRANT_COLLECTION,
             points_selector=[chunk_id],
         )
-        with neo4j_driver.session() as session:
-            session.run(
-                "MATCH (m:Memory {chunk_id: $cid}) DETACH DELETE m",
-                cid=chunk_id,
-            )
-        neo4j_driver.close()
+        with _neo4j_driver(NEO4J_URI, (NEO4J_USER, NEO4J_PASSWORD)) as driver:
+            with driver.session() as session:
+                session.run(
+                    "MATCH (m:Memory {chunk_id: $cid}) DETACH DELETE m",
+                    cid=chunk_id,
+                )
         return {"forgotten": True, "hard": True, "chunk_id": chunk_id}
     else:
-        with neo4j_driver.session() as session:
-            session.run(
-                "MATCH (m:Memory {chunk_id: $cid}) SET m.tombstone = true",
-                cid=chunk_id,
-            )
-        neo4j_driver.close()
+        with _neo4j_driver(NEO4J_URI, (NEO4J_USER, NEO4J_PASSWORD)) as driver:
+            with driver.session() as session:
+                session.run(
+                    "MATCH (m:Memory {chunk_id: $cid}) SET m.tombstone = true",
+                    cid=chunk_id,
+                )
         return {"forgotten": True, "hard": False, "chunk_id": chunk_id}
 
 

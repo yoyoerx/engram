@@ -7,15 +7,18 @@ from typing import Annotated
 from pydantic import Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
-from neo4j import GraphDatabase
 
 from engram_mcp.config import (
     MEMORY_TYPES, QDRANT_URL, QDRANT_COLLECTION,
     NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD,
 )
+from engram_mcp.retry import neo4j_driver as _neo4j_driver
+from engram_mcp.logger import get_logger
 from engram_mcp.ingest.chunker import chunk
 from engram_mcp.ingest.embedder import embed
 from engram_mcp.ingest.extractor import extract
+
+_log = get_logger("store")
 
 
 def _upsert_graph(driver, chunk_id: str, content: str, memory_type: str,
@@ -112,12 +115,11 @@ async def store_memory(
         }
 
     qdrant = QdrantClient(url=QDRANT_URL)
-    neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     timestamp = datetime.now(timezone.utc).isoformat()
     stored_ids: list[str] = []
     total_entities = 0
 
-    try:
+    with _neo4j_driver(NEO4J_URI, (NEO4J_USER, NEO4J_PASSWORD)) as driver:
         for chunk_text in chunk(content):
             chunk_id = str(uuid.uuid4())
             extracted = extract(chunk_text)
@@ -125,7 +127,7 @@ async def store_memory(
             vector = await embed(chunk_text)
 
             neo4j_id = _upsert_graph(
-                neo4j_driver, chunk_id, chunk_text,
+                driver, chunk_id, chunk_text,
                 memory_type, project, timestamp, extracted,
             )
 
@@ -138,12 +140,27 @@ async def store_memory(
                 "neo4j_node_id": neo4j_id,
                 **(metadata or {}),
             }
-            qdrant.upsert(
-                collection_name=QDRANT_COLLECTION,
-                points=[PointStruct(id=chunk_id, vector=vector, payload=payload)],
-            )
+            try:
+                qdrant.upsert(
+                    collection_name=QDRANT_COLLECTION,
+                    points=[PointStruct(id=chunk_id, vector=vector, payload=payload)],
+                )
+            except Exception as qdrant_exc:
+                # Compensating delete: remove the Neo4j node we just wrote.
+                try:
+                    with driver.session() as session:
+                        session.run(
+                            "MATCH (m:Memory {chunk_id: $cid}) DETACH DELETE m",
+                            cid=chunk_id,
+                        )
+                except Exception as rollback_exc:
+                    _log.error(
+                        "rollback failed — orphaned Neo4j node",
+                        extra={"chunk_id": chunk_id, "exc": str(rollback_exc)},
+                    )
+                raise qdrant_exc
 
-            with neo4j_driver.session() as session:
+            with driver.session() as session:
                 session.run(
                     "MATCH (m:Memory {chunk_id: $cid}) SET m.vector_id = $cid",
                     cid=chunk_id,
@@ -151,9 +168,15 @@ async def store_memory(
 
             stored_ids.append(chunk_id)
 
-    finally:
-        neo4j_driver.close()
-
+    _log.info(
+        "memory stored",
+        extra={
+            "chunks": len(stored_ids),
+            "entities": total_entities,
+            "memory_type": memory_type,
+            "project": project,
+        },
+    )
     return {
         "stored": True,
         "chunk_ids": stored_ids,

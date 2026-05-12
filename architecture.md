@@ -7,7 +7,7 @@ This document is the living architectural record for **Engram**, a local-first h
 **Repository:** https://github.com/yoyoerx/engram
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
-**Status:** MVP Complete
+**Status:** Phase 7 Complete
 **Last Updated:** 2026-05-12
 
 ---
@@ -131,7 +131,7 @@ Processes raw text into both stores:
 2. **Extractor** (`extractor.py`) — calls Claude (`claude-haiku-4-5-20251001`, for cost) with a structured prompt to extract entity/relationship triples. Falls back to empty result on any error so ingestion is never blocked.
 3. **Embedder** (`embedder.py`) — calls Ollama HTTP API to generate `nomic-embed-text` 768-dim embeddings.
 
-> **Note:** Atomic rollback (Neo4j fails -> undo Qdrant write) is not yet implemented. This is tracked in Phase 7. In practice, partial writes leave orphan vectors without Neo4j nodes; a future reconciliation job can clean these up.
+> **Atomic rollback:** If the Qdrant upsert fails after the Neo4j node has been written, a compensating `DETACH DELETE` removes the orphaned Neo4j node. Rollback is per-chunk — earlier successfully-stored chunks are preserved.
 
 ### 4.3 Retrieval Engine (`engram_mcp/search/`)
 Runs vector and graph queries in parallel, merges results:
@@ -389,6 +389,8 @@ engram/
 ├── engram_mcp/                  # MCP server package (named to avoid shadowing 'mcp' lib)
 │   ├── server.py                # FastMCP entry point — registers all tools
 │   ├── config.py                # Config (ports, model names, weights, memory types)
+│   ├── retry.py                 # Exponential backoff — retry_sync/async, neo4j_driver ctx mgr
+│   ├── logger.py                # Structured logger — JSON-lines to file, warnings to stderr
 │   │
 │   ├── ingest/                  # Ingestion pipeline
 │   │   ├── __init__.py
@@ -413,11 +415,14 @@ engram/
 │   ├── init_db.py               # Apply Neo4j constraints + create Qdrant collection
 │   ├── migrate.py               # Import from flat-file memory/*.md directory
 │   ├── health_check.py          # Verify all four services are running
-│   └── smoke_retrieve.py        # Quick retrieval sanity check
+│   ├── smoke_retrieve.py        # Quick retrieval sanity check
+│   └── benchmark.py             # Latency benchmark — reports p50/p95/p99 for retrieve_context
 │
 └── tests/
-    ├── test_ingest.py           # Chunker, embedder, store_memory (15 tests, all passing)
-    └── test_retrieve.py         # Merger unit tests + retrieve_context integration tests
+    ├── test_ingest.py           # Chunker, embedder, store_memory (integration, needs live services)
+    ├── test_retrieve.py         # Merger unit tests + retrieve_context integration tests
+    ├── test_retry.py            # Retry utility unit tests (14 tests, no live services)
+    └── test_store_rollback.py   # Atomic rollback unit tests (3 tests, no live services)
 ```
 
 ---
@@ -464,6 +469,20 @@ engram/
 ### ADR-009: MCP server registered in `~/.claude.json`, not `settings.json`
 **Decision:** Register the Engram MCP server via `claude mcp add -s user`, which writes to `~/.claude.json`.
 **Rationale:** The `~/.claude/settings.json` schema does not accept an `mcpServers` key — it will silently reject or error on it. Global (user-scoped) MCP servers must be registered via the CLI, which writes to `~/.claude.json`. Project-scoped servers can alternatively be defined in `.mcp.json` at the project root.
+
+### ADR-011: Retry at the connection layer, not the tool layer
+**Decision:** Retry logic wraps Neo4j *connections* (via a context manager) and individual *HTTP calls* (via decorators on `embed` and `extract`), not the entire `store_memory` / `retrieve_context` functions.
+**Rationale:** Retrying an entire tool function would re-embed, re-extract, and potentially re-write already-committed chunks. Wrapping only the connection and individual I/O calls keeps retries targeted to the failure site, avoids duplicate writes, and preserves partial-success semantics across multi-chunk ingestion.
+**Trade-off:** More wiring — each call site must explicitly use `retry_async`/`retry_sync` or `neo4j_driver`. The alternative (retry at the MCP tool level) would be simpler to wire but riskier for correctness.
+
+### ADR-012: Structured logging to file, not stdout
+**Decision:** `engram_mcp/logger.py` writes JSON-lines to `~/.engram/logs/engram.log` (rotating, 5 MB × 3 backups). `WARNING` and above also go to `stderr`. Nothing goes to `stdout`.
+**Rationale:** The MCP server communicates with Claude Code via `stdio` — any content written to `stdout` would corrupt the MCP protocol framing. Logs must go elsewhere. A rotating file keeps disk usage bounded. `stderr` surfacing warnings provides immediate visibility during development without breaking the wire format.
+
+### ADR-013: Per-chunk atomic rollback (compensating delete)
+**Decision:** If Qdrant upsert fails after a Neo4j node has been written for that chunk, issue `DETACH DELETE` on the Neo4j node as a compensating transaction. Earlier successfully-stored chunks in the same `store_memory` call are not rolled back.
+**Rationale:** True two-phase commit across Neo4j and Qdrant is not available without a distributed transaction coordinator. Per-chunk compensation is a pragmatic middle ground: it eliminates the most common orphan scenario (Neo4j node without a Qdrant vector) while keeping partial-success semantics for multi-chunk content. If rollback itself fails, the orphaned node's `chunk_id` is logged at ERROR level for manual cleanup.
+**Trade-off:** No rollback for the reverse scenario (Qdrant succeeds, Neo4j `vector_id` update fails). This leaves a vector without a `vector_id` in Neo4j, which is a minor inconsistency — graph traversal still works, only the cross-reference pointer is missing.
 
 ### ADR-010: CLAUDE.md for proactive memory routing
 **Decision:** Use `~/.claude/CLAUDE.md` to instruct Claude Code to route all memory through Engram instead of the flat-file system.
@@ -572,11 +591,14 @@ All 6 Engram tools should also be added to `permissions.allow` in `~/.claude/set
 - [x] Retrieval verified against migrated memories
 - [x] `~/.claude/CLAUDE.md` written to route future memory through Engram
 
-### Phase 7 — Hardening (Pending)
-- [ ] Atomic write rollback (Neo4j fails -> undo Qdrant write)
-- [ ] Retry logic for Ollama and Neo4j transient failures
-- [ ] Structured logging
-- [ ] Performance baseline (retrieval < 500ms p95)
+### Phase 7 — Hardening ✅
+- [x] Retry logic — `engram_mcp/retry.py`: `retry_sync`, `retry_async`, `call_with_retry_*`, `neo4j_driver` context manager with exponential backoff. Applied to embedder (Ollama), extractor (Anthropic), and all Neo4j connections.
+- [x] Structured logging — `engram_mcp/logger.py`: JSON-lines to rotating file (`~/.engram/logs/engram.log`, 5 MB × 3), human-readable warnings+ to stderr. Used in retry and store.
+- [x] Atomic write rollback — if Qdrant upsert fails after Neo4j write, a compensating `DETACH DELETE` removes the orphaned Neo4j node. Per-chunk granularity.
+- [x] Retry unit tests — `tests/test_retry.py` (14 tests, no live services)
+- [x] Rollback unit tests — `tests/test_store_rollback.py` (3 tests, no live services)
+- [x] Benchmark script — `scripts/benchmark.py` reports p50/p95/p99 for `retrieve_context` (run with `--queries 20`)
+- [ ] Performance baseline — run `scripts/benchmark.py` against live services and record numbers here
 
 ---
 

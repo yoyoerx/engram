@@ -1,9 +1,9 @@
 """Neo4j graph traversal with lightweight entity hint extraction."""
 
 import re
-from neo4j import GraphDatabase
 
 from engram_mcp.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
+from engram_mcp.retry import neo4j_driver as _neo4j_driver
 
 # Match Title-Case words and ALL_CAPS tokens as candidate entity names
 _ENTITY_HINT_RE = re.compile(r'\b([A-Z][a-zA-Z]{2,}|[A-Z]{2,})\b')
@@ -29,7 +29,6 @@ def traverse(
     if not hints:
         return []
 
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     results: dict[str, dict] = {}
 
     type_filter_m = "AND m.memory_type IN $types " if memory_types else ""
@@ -37,7 +36,7 @@ def traverse(
     project_filter = "AND m.project = $project " if project else ""
     project_filter_m2 = "AND m2.project = $project " if project else ""
 
-    try:
+    with _neo4j_driver(NEO4J_URI, (NEO4J_USER, NEO4J_PASSWORD)) as driver:
         with driver.session() as session:
             for hint in hints:
                 # Direct: Memory nodes ABOUT an entity matching the hint
@@ -104,8 +103,6 @@ def traverse(
                             "neo4j_node_id": row["neo4j_node_id"],
                             "_source": "graph",
                         }
-    finally:
-        driver.close()
 
     return list(results.values())
 
@@ -114,9 +111,8 @@ def get_related_entities(entity: str, relationship: str | None = None, depth: in
     """Traverse from a named entity and return connected nodes."""
     rel_pattern = f"[r:{relationship}*1..{depth}]" if relationship else f"[*1..{depth}]"
 
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     relationships = []
-    try:
+    with _neo4j_driver(NEO4J_URI, (NEO4J_USER, NEO4J_PASSWORD)) as driver:
         with driver.session() as session:
             rows = session.run(
                 f"""
@@ -138,7 +134,5 @@ def get_related_entities(entity: str, relationship: str | None = None, depth: in
                     "target": row["name"],
                     "label": row["label"],
                 })
-    finally:
-        driver.close()
 
     return {"entity": entity, "relationships": relationships}

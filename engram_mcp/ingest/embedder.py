@@ -2,8 +2,10 @@
 
 import httpx
 from engram_mcp.config import OLLAMA_BASE_URL, EMBED_MODEL, VECTOR_SIZE
+from engram_mcp.retry import retry_async
 
 
+@retry_async(max_attempts=3, base_delay=0.5, backoff=2.0)
 async def embed(text: str) -> list[float]:
     """Return a 768-dim embedding vector for the given text."""
     async with httpx.AsyncClient(timeout=30) as client:
