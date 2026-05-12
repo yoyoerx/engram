@@ -8,10 +8,27 @@ from engram_mcp.retry import neo4j_driver as _neo4j_driver
 # Match Title-Case words and ALL_CAPS tokens as candidate entity names
 _ENTITY_HINT_RE = re.compile(r'\b([A-Z][a-zA-Z]{2,}|[A-Z]{2,})\b')
 
+# Common English words that start with a capital but are not entity names.
+# Without this filter, question words like "What" match arbitrary graph nodes
+# and trigger expensive variable-length path expansions.
+_STOPWORDS = frozenset({
+    "What", "Which", "Where", "When", "Why", "Who", "How", "Are", "Is",
+    "Was", "Were", "Has", "Have", "Had", "Does", "Did", "Do", "Can",
+    "Could", "Should", "Would", "Will", "Shall", "May", "Might", "Must",
+    "The", "This", "That", "These", "Those", "Any", "All", "Some",
+    "And", "But", "For", "Not", "With", "From", "Into", "About", "Over",
+    "Please", "Summarise", "Summarize", "Describe", "Explain", "List",
+    "Tell", "Show", "Find", "Get", "Give",
+})
+
 
 def _extract_hints(query: str) -> list[str]:
     """Pull capitalised tokens from the query as candidate entity names."""
-    return list({m.group(1) for m in _ENTITY_HINT_RE.finditer(query)})
+    return [
+        m.group(1)
+        for m in _ENTITY_HINT_RE.finditer(query)
+        if m.group(1) not in _STOPWORDS
+    ]
 
 
 def traverse(

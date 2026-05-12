@@ -648,7 +648,11 @@ Two hooks are wired for automatic Engram lifecycle management:
 - [x] Retry unit tests — `tests/test_retry.py` (14 tests, no live services)
 - [x] Rollback unit tests — `tests/test_store_rollback.py` (3 tests, no live services)
 - [x] Benchmark script — `scripts/benchmark.py` reports p50/p95/p99 for `retrieve_context` (run with `--queries 20`)
-- [ ] Performance baseline — run `scripts/benchmark.py` against live services and record numbers here
+- [x] Performance baseline — `retrieve_context` on RTX 2060 / Ollama GPU / local Qdrant+Neo4j (20 queries, 3 warmup):
+  - min 992 ms | mean 1097 ms | p50 1064 ms | p95 1199 ms | p99 1607 ms | max 1709 ms
+  - Primary bottleneck: Ollama embed (~900 ms/query GPU-accelerated).
+  - Bug fixed: stopwords filter added to `_extract_hints` — generic question words ("What", "Are",
+    etc.) were matching arbitrary Neo4j nodes and triggering 2-hop path expansions that took >170 s.
 
 ### Operational Hardening (post-Phase 7) ✅
 - [x] `scripts/start.py` — idempotent cold-start; starts Docker Compose services, checks/starts Ollama, runs health check. Flags: `--wait`, `--health-only`.
