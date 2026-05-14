@@ -1,9 +1,45 @@
 """Qdrant semantic search."""
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 
-from engram_mcp.config import QDRANT_URL, QDRANT_COLLECTION
+from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, SetPayload
+
+from engram_mcp.config import QDRANT_URL, QDRANT_COLLECTION, ENGRAM_STATS_PATH
+
+
+def _current_session() -> int:
+    """Read the current session count from stats.json. Returns 0 if unavailable."""
+    try:
+        stats = json.loads(Path(ENGRAM_STATS_PATH).read_text(encoding="utf-8"))
+        return int(stats.get("session_count", 0))
+    except Exception:
+        return 0
+
+
+def _update_retrieval_stats(client: QdrantClient, hits: list) -> None:
+    """Fire-and-forget: increment retrieval_count and set last_retrieved_session on returned hits."""
+    session = _current_session()
+    now = datetime.now(timezone.utc).isoformat()
+
+    for hit in hits:
+        p = hit.payload or {}
+        chunk_id = p.get("chunk_id", str(hit.id))
+        new_count = p.get("retrieval_count", 0) + 1
+        try:
+            client.set_payload(
+                collection_name=QDRANT_COLLECTION,
+                payload={
+                    "retrieval_count": new_count,
+                    "last_retrieved_session": session,
+                    "last_retrieved": now,
+                },
+                points=[hit.id],
+            )
+        except Exception:
+            pass
 
 
 def search(
@@ -40,14 +76,18 @@ def search(
     for hit in hits:
         p = hit.payload or {}
         results.append({
-            "chunk_id": p.get("chunk_id", hit.id),
+            "chunk_id": p.get("chunk_id", str(hit.id)),
             "content": p.get("content", ""),
             "score": hit.score,
             "memory_type": p.get("memory_type"),
             "project": p.get("project"),
             "timestamp": p.get("timestamp"),
             "neo4j_node_id": p.get("neo4j_node_id"),
+            "retrieval_count": p.get("retrieval_count", 0),
+            "last_retrieved_session": p.get("last_retrieved_session"),
             "_source": "vector",
         })
+
+    _update_retrieval_stats(client, hits)
 
     return results

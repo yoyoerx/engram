@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -103,5 +104,28 @@ def main() -> None:
     print(json.dumps({"systemMessage": msg}, ensure_ascii=True))
 
 
+def _increment_session_counter() -> int:
+    """Atomically increment the global session counter in ~/.engram/stats.json. Returns new count."""
+    stats_path = Path.home() / ".engram" / "stats.json"
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        stats = json.loads(stats_path.read_text(encoding="utf-8")) if stats_path.exists() else {}
+    except Exception:
+        stats = {}
+
+    count = stats.get("session_count", 0) + 1
+    stats["session_count"] = count
+    stats["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        stats_path.write_text(json.dumps(stats, ensure_ascii=True), encoding="utf-8")
+    except Exception:
+        pass
+
+    return count
+
+
 if __name__ == "__main__":
+    _increment_session_counter()
     main()

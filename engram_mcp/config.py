@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -25,3 +26,9 @@ CHUNK_SIZE = 512        # max chars per chunk
 CHUNK_OVERLAP = 64      # overlap between chunks
 
 MEMORY_TYPES = {"feedback", "user", "project", "reference", "decision", "error"}
+
+# Decay scoring (session-count based, not time-based)
+DECAY_LAMBDA = float(os.getenv("DECAY_LAMBDA", "0.1"))      # half-life ~7 sessions
+USAGE_BOOST_MAX = float(os.getenv("USAGE_BOOST_MAX", "0.5")) # max +50% for heavily used memories
+ENGRAM_STATS_PATH = Path.home() / ".engram" / "stats.json"
+ENGRAM_SESSIONS_DIR = Path.home() / ".engram" / "sessions"

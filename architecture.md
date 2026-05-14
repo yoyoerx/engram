@@ -7,8 +7,8 @@ This document is the living architectural record for **Engram**, a local-first h
 **Repository:** https://github.com/yoyoerx/engram
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
-**Status:** Phase 7 Complete + operational hardening + OQ-7 resolved
-**Last Updated:** 2026-05-12
+**Status:** Phase 9 Complete — Configuration System
+**Last Updated:** 2026-05-14
 
 ---
 
@@ -60,7 +60,6 @@ Engram solves this by replacing load-everything retrieval with **query-driven hy
 - **Migration-friendly**: Existing flat-file memories can be ingested.
 
 ### Non-Goals (v1)
-- Real-time conversation interception (v1 requires explicit `store_memory` calls).
 - Multi-user / multi-tenant support.
 - Cloud sync or remote access.
 - Supporting embedding models beyond Ollama-served ones.
@@ -416,10 +415,19 @@ engram/
 │   ├── migrate.py               # Import from flat-file memory/*.md directory
 │   ├── health_check.py          # Verify all services are reachable; exits 1 if any down
 │   ├── start.py                 # Cold-start: docker compose up -d, check/start Ollama, health check
-│   ├── session_start.py         # SessionStart hook — fires on every Claude Code session open
-│   ├── stop_hook.py             # Stop hook — nudges store_memory after 15+ min idle, per response
+│   ├── session_start.py         # SessionStart hook — starts services, increments session_count
+│   ├── prompt_hook.py           # UserPromptSubmit hook — auto-retrieves memories before every prompt
+│   ├── stop_hook.py             # Stop hook — throttled auto-storage launcher (every N exchanges)
+│   ├── compact_hook.py          # PreCompact hook — triggers auto-storage + resets dedup state
+│   ├── auto_store.py            # Background agent — Haiku extraction + incremental store
+│   ├── session_cache.py         # Per-session state: query hashes, seen chunk_ids, exchange counter
+│   ├── engram_config.py         # Shared config loader: global + per-project + env var merge
+│   ├── configure.py             # Config CLI: show / set / hooks install / hooks status
 │   ├── smoke_retrieve.py        # Quick retrieval sanity check
 │   └── benchmark.py             # Latency benchmark — reports p50/p95/p99 for retrieve_context
+│
+│   Per-project override (in any project root, optional):
+│   .engram.json                 # Project-local config overrides (exchange_threshold, auto_store, etc.)
 │
 └── tests/
     ├── test_ingest.py           # Chunker, embedder, store_memory (integration, needs live services)
@@ -487,6 +495,12 @@ engram/
 **Rationale:** True two-phase commit across Neo4j and Qdrant is not available without a distributed transaction coordinator. Per-chunk compensation is a pragmatic middle ground: it eliminates the most common orphan scenario (Neo4j node without a Qdrant vector) while keeping partial-success semantics for multi-chunk content. If rollback itself fails, the orphaned node's `chunk_id` is logged at ERROR level for manual cleanup.
 **Trade-off:** No rollback for the reverse scenario (Qdrant succeeds, Neo4j `vector_id` update fails). This leaves a vector without a `vector_id` in Neo4j, which is a minor inconsistency — graph traversal still works, only the cross-reference pointer is missing.
 
+### ADR-016: Two-tier configuration system (global + per-project)
+**Decision:** Engram hook behavior is controlled by a two-level JSON config system: `~/.engram/config.json` (global) and `{project}/.engram.json` (per-project). Per-project overrides global. Environment variables (`ENGRAM_*`) override both.
+**Rationale:** Different projects have different needs. A documentation repo might want `auto_retrieve: false` because prompt latency matters more than memory injection. A complex long-running project might want `exchange_threshold: 3` for more frequent mid-session storage. Hard-coding these values in the hook scripts made tuning awkward and required editing source files. A config file that hooks consult at runtime is the natural solution.
+**Implementation:** `scripts/engram_config.py` is the single loader used by all hooks. It merges defaults → global → project → env vars in priority order, so any single tier can be overridden without touching the others. `scripts/configure.py` is the management CLI (show / set / hooks install / hooks status).
+**Trade-off:** Hook startup now reads one or two JSON files per invocation. On disk this is <1 ms and well within hook timeout budgets.
+
 ### ADR-010: CLAUDE.md for proactive memory routing
 **Decision:** Use `~/.claude/CLAUDE.md` to instruct Claude Code to route all memory through Engram instead of the flat-file system, and to behave proactively about saving and recalling memories.
 **Rationale:** Claude Code's behavior is controlled by system-prompt instructions in CLAUDE.md. By placing global instructions there, we redirect memory operations and enforce proactive patterns (session-start retrieve_context, save-after-task, err-on-store) without modifying Claude Code itself. All 6 Engram MCP tools are added to `permissions.allow` in `settings.json` to suppress per-call permission prompts.
@@ -550,37 +564,56 @@ All 6 Engram tools should also be added to `permissions.allow` in `~/.claude/set
 
 ### Claude Code Hooks (`~/.claude/settings.json`)
 
-Two hooks are wired for automatic Engram lifecycle management (a third, PreCompact, was removed — see ADR-015):
+Four hooks wire Engram into the Claude Code lifecycle. Install them with:
+```bash
+python scripts/configure.py hooks install
+```
 
-**SessionStart** — fires every time Claude Code opens a session:
+| Hook | Script | Timeout | Purpose |
+|---|---|---|---|
+| `SessionStart` | `session_start.py` | 30s | Start Docker services, increment session counter, emit status banner |
+| `UserPromptSubmit` | `prompt_hook.py` | 10s | Retrieve top-N memories, inject as `systemMessage` before prompt |
+| `Stop` | `stop_hook.py` | 10s | Throttled auto-storage launcher (every N exchanges) |
+| `PreCompact` | `compact_hook.py` | 5s | Capture memories before compaction, reset seen_chunk_ids |
+
+All paths must use forward slashes on Windows (backslashes are stripped by the hook runner).
+
+### Configuration
+
+Engram hook behavior is controlled by a two-tier JSON config system:
+
+**Global** (`~/.engram/config.json`):
 ```json
 {
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{ "type": "command",
-                  "command": "python C:\\Users\\Kevin\\Projects\\engram\\scripts\\session_start.py",
-                  "timeout": 30 }]
-    }]
-  }
+  "exchange_threshold": 5,
+  "retrieve_limit": 5,
+  "auto_retrieve": true,
+  "auto_store": true
 }
 ```
-`session_start.py` runs `docker compose up -d`, checks Qdrant and Ollama reachability, starts Ollama if not running, and outputs a `systemMessage` banner (`[Engram] ready -- ...`). Completes in under 5 seconds when services are already up.
 
-**Stop** — fires after every Claude Code response:
+**Per-project** (`{project}/.engram.json`):
 ```json
 {
-  "hooks": {
-    "Stop": [{
-      "hooks": [{ "type": "command",
-                  "command": "python C:\\Users\\Kevin\\Projects\\engram\\scripts\\stop_hook.py",
-                  "timeout": 10 }]
-    }]
-  }
+  "exchange_threshold": 3,
+  "auto_store": false
 }
 ```
-`stop_hook.py` checks minutes since the last `store_memory` call and emits a `systemMessage` nudge: mild reminder at 15–30 min idle, strong warning beyond 30 min. Silent when Qdrant is unreachable or a recent store already happened (<15 min).
 
-The PreCompact hook was removed (see ADR-015). The Stop hook handles idle-time nudging while Claude still has an action window.
+Per-project keys override global. `ENGRAM_*` env vars override both. Manage via CLI:
+```bash
+python scripts/configure.py show
+python scripts/configure.py set exchange_threshold 3
+python scripts/configure.py set auto_retrieve false --project .
+python scripts/configure.py hooks status
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `exchange_threshold` | 5 | Stop events between auto-store runs |
+| `retrieve_limit` | 5 | Max memories injected per prompt |
+| `auto_retrieve` | true | Enable UserPromptSubmit injection |
+| `auto_store` | true | Enable background auto-storage |
 
 ### CLAUDE.md — Memory Routing and Proactive Behavior
 `~/.claude/CLAUDE.md` contains global instructions that control Claude's memory behavior across all sessions:
@@ -665,6 +698,44 @@ The PreCompact hook was removed (see ADR-015). The Stop hook handles idle-time n
 - [x] `~/.claude/settings.json` — SessionStart and Stop hooks configured.
 - [x] `list_memories` tombstone filter fixed (OQ-7) — `FieldCondition` was guarded by `if False` debug artifact; tombstoned memories now correctly excluded from list output.
 
+### Phase 8 — Biomimetic Memory Agent ✅
+Autonomous, invisible memory operations modeled on human memory consolidation. Memories are retrieved before every prompt and stored after every session without explicit user action.
+
+**Phase 8A — Auto-Retrieval**
+- [x] `scripts/prompt_hook.py` — `UserPromptSubmit` hook wired globally; retrieves top-5 relevant memories before every Claude Code prompt; formats them as a `[Engram context]` systemMessage injection; session-deduplicates to avoid re-injecting seen chunk_ids.
+- [x] `scripts/session_cache.py` — per-session state in `~/.engram/sessions/{session_id}.json`; tracks query hashes (ring buffer, last 20) and seen chunk_ids (cap 200) to prevent redundant injections.
+- [x] Query enriched with detected project name from `cwd` basename for improved graph traversal.
+- [x] Graceful degradation: any exception → silent exit, hook never blocks or errors a session.
+
+**Phase 8B — Session-Count Decay**
+- [x] `scripts/session_start.py` — increments global `session_count` in `~/.engram/stats.json` on each session open.
+- [x] `engram_mcp/search/vector.py` — after each search, fire-and-forget Qdrant payload update: increments `retrieval_count`, sets `last_retrieved_session` (session number) and `last_retrieved` (ISO timestamp).
+- [x] `engram_mcp/search/merger.py` — applies session-count decay formula to final scores: `adjusted = base * (1 + min(0.5, 0.1 * retrieval_count)) * exp(-λ * sessions_since_retrieved)` where λ = 0.1 (half-life ~7 sessions). Decay is zero for memories never retrieved (no penalty for new memories). No time-based decay — a month without coding = zero new sessions = zero decay.
+- [x] `engram_mcp/config.py` — `DECAY_LAMBDA`, `USAGE_BOOST_MAX`, `ENGRAM_STATS_PATH`, `ENGRAM_SESSIONS_DIR` constants.
+
+**Phase 8C — Auto-Storage at Session End**
+- [x] `scripts/stop_hook.py` — rewritten as a thin launcher; spawns `auto_store.py` as a detached background process (`start_new_session=True`) and exits immediately; no blocking, no timeout risk.
+- [x] `scripts/auto_store.py` — async background extraction agent; reads session transcript JSONL, calls Claude Haiku to extract memories worth keeping (decisions, errors, feedback, project notes, references), calls `store_memory` directly for each candidate; logs to `~/.engram/logs/auto_store.log`; deduplicates within run; exits silently on any error.
+
+**Phase 8D — Mid-Session Storage (incremental auto-store)**
+- [x] `scripts/stop_hook.py` — throttled: spawns `auto_store.py` every N exchanges (configurable, default 5) rather than every response; saves `transcript_path` and `cwd` to session cache for downstream use.
+- [x] `scripts/compact_hook.py` — on PreCompact: spawns `auto_store.py` unconditionally (`--force`) before clearing `seen_chunk_ids`, so no accumulated context is lost at compaction.
+- [x] `scripts/auto_store.py` — rewritten as incremental agent: tracks `last_auto_store_msg_count` in session cache to process only new transcript messages per run; cross-run dedup via `stored_content_hashes` in session cache (cap 150).
+- [x] `scripts/session_cache.py` — extended: added `exchange_count`, `stored_content_hashes`, `last_auto_store_msg_count`, `transcript_path`, `cwd` fields; backward compat via defaults merge on load.
+
+**Tests**
+- [x] `tests/test_decay.py` — 8 unit tests for `_adjusted_score`: never-retrieved, stale (30 sessions), usage cap, no-coding-gap invariant, sessions_since clamped to 0.
+- [x] `tests/test_prompt_hook.py` — 25 unit tests for `_detect_project`, `_query_hash`, `_format_memories`, session cache load/save/dedup/ring-buffer, exchange counter, stored hash dedup, backward compat.
+
+### Phase 9 — Configuration System ✅
+Two-tier configuration: global (`~/.engram/config.json`) and per-project (`{project}/.engram.json`), with environment variable overrides. Hooks consult the config at runtime so behavior can be tuned without touching code.
+
+- [x] `scripts/engram_config.py` — shared loader; merges defaults → global → project → env vars; used by all hooks.
+- [x] `scripts/configure.py` — management CLI: `show`, `set`, `hooks install`, `hooks status`. Handles both global and per-project targets.
+- [x] `scripts/prompt_hook.py` — reads `retrieve_limit` and `auto_retrieve` from config; saves `cwd` to session cache for stop_hook's per-project lookup.
+- [x] `scripts/stop_hook.py` — reads `exchange_threshold` and `auto_store` from config (using cwd from session cache for per-project resolution).
+- [x] ADR-016 — two-tier config design decision documented.
+
 ---
 
 ## 14. Migration Path
@@ -685,8 +756,7 @@ Post-migration: Claude Code can be configured to prefer `retrieve_context` over 
 
 ## 15. Future Considerations
 
-- **Automated ingestion**: Hook into Claude Code's post-conversation hook to auto-store conversation summaries without explicit `store_memory` calls.
-- **Memory aging**: Decay relevance scores for memories that haven't been retrieved recently; surface stale memories for review.
+- **Memory aging — tombstone threshold**: Currently decay only lowers ranking; consider auto-tombstoning memories with very high session-staleness (e.g., 200+ sessions without retrieval).
 - **Conflict detection**: When a new memory contradicts an existing one (e.g., a corrected Feedback), flag the conflict and create a SUPERSEDES relationship automatically.
 - **Multi-LLM support**: Parameterize the MCP transport to support OpenAI-compatible APIs, enabling non-Claude LLMs to use Engram.
 - **Web UI**: A simple read-only browser over the knowledge graph (possibly just Neo4j Browser is sufficient).

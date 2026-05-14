@@ -106,8 +106,15 @@ async def store_memory(
         dict | None,
         Field(description="Additional key-value metadata (optional)."),
     ] = None,
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Optional list of tag strings. Stored inside metadata as 'tags'."),
+    ] = None,
 ) -> dict:
     """Store a memory chunk in the vector store and knowledge graph."""
+    if tags:
+        metadata = {**(metadata or {}), "tags": tags}
+
     if memory_type not in MEMORY_TYPES:
         return {
             "stored": False,

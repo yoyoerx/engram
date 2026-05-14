@@ -1,102 +1,101 @@
 """
-Stop hook for Engram.
+Stop hook for Engram — throttled launcher.
 
 Wired into ~/.claude/settings.json Stop hook.
-Fires after every Claude Code response. Checks when the last store_memory
-call was made and injects a systemMessage nudging Claude to store if the
-gap is large enough to risk losing context.
+Fires after every Claude Code response.
 
-Thresholds:
-  < 15 min  — silent (no output)
-  15-30 min — mild reminder
-  > 30 min  — strong nudge
+Spawns auto_store.py as a detached background process every ENGRAM_EXCHANGE_THRESHOLD
+responses (default 5). This gives subconscious mid-session storage without making a
+Haiku API call on every single turn.
+
+auto_store.py processes only new transcript messages since its last run (incremental),
+so each invocation is cheap and deduplication is handled via session cache.
 
 Exit codes:
-  0 — hook completed (session continues normally)
-
-Output JSON:
-  { "systemMessage": "..." }  or nothing (silent turns)
+  0 -- hook completed (session continues normally)
 """
 
 import json
-import os
+import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv(ROOT / ".env")
-except ImportError:
-    pass
-
-
-def _minutes_since_last_store() -> int | None:
-    """Return minutes since the most recently stored memory, or None if unavailable."""
-    try:
-        from qdrant_client import QdrantClient
-
-        url = os.getenv("QDRANT_URL", "http://localhost:6333")
-        collection = os.getenv("QDRANT_COLLECTION", "engram_memories")
-
-        qdrant = QdrantClient(url=url, timeout=2)
-        results, _ = qdrant.scroll(
-            collection_name=collection,
-            limit=100,
-            with_payload=True,
-            with_vectors=False,
-        )
-        if not results:
-            return None
-
-        timestamps = [
-            r.payload.get("timestamp", "")
-            for r in results
-            if r.payload and r.payload.get("timestamp")
-        ]
-        if not timestamps:
-            return None
-
-        most_recent = max(timestamps)
-        ts = datetime.fromisoformat(most_recent)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        delta = datetime.now(timezone.utc) - ts
-        return int(delta.total_seconds() / 60)
-    except Exception:
-        return None
 
 
 def main() -> None:
     try:
         raw = sys.stdin.read()
-        _data = json.loads(raw) if raw.strip() else {}
+        data = json.loads(raw) if raw.strip() else {}
     except Exception:
-        _data = {}
+        data = {}
 
-    minutes = _minutes_since_last_store()
-
-    if minutes is None or minutes < 15:
-        # Silent — Qdrant unreachable, or a recent store already happened
+    if data.get("stop_hook_active"):
         return
 
-    if minutes > 30:
-        msg = (
-            f"[Engram] {minutes} minutes since last store_memory. "
-            f"Call mcp__engram__store_memory now if any decisions, feedback, "
-            f"bugs, or task completions from this session have not been saved."
+    transcript_path = data.get("transcript_path", "")
+    session_id = data.get("session_id", "")
+
+    if not transcript_path or not session_id:
+        return
+
+    auto_store = ROOT / "scripts" / "auto_store.py"
+    if not auto_store.exists():
+        return
+
+    try:
+        from scripts.session_cache import (
+            load_cache, save_cache, increment_exchange, reset_exchange_count,
         )
-    else:
-        msg = (
-            f"[Engram] {minutes} minutes since last store_memory. "
-            f"Consider calling mcp__engram__store_memory if anything worth "
-            f"keeping came up this turn."
+    except ImportError:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from session_cache import (
+            load_cache, save_cache, increment_exchange, reset_exchange_count,
         )
 
-    print(json.dumps({"systemMessage": msg}, ensure_ascii=True))
+    cache = load_cache(session_id)
+    cache["transcript_path"] = transcript_path  # compact_hook reads this
+
+    # Load per-project config using cwd saved by prompt_hook (which has cwd from stdin)
+    cwd = cache.get("cwd", "")
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from engram_config import load_config
+        config = load_config(cwd)
+    except Exception:
+        config = {"auto_store": True, "exchange_threshold": 5}
+
+    if not config.get("auto_store", True):
+        save_cache(session_id, cache)
+        return
+
+    exchange_count = increment_exchange(cache)
+    threshold = config.get("exchange_threshold", 5)
+
+    should_run = exchange_count >= threshold
+    if should_run:
+        reset_exchange_count(cache)
+
+    save_cache(session_id, cache)
+
+    if not should_run:
+        return
+
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(auto_store),
+                "--transcript", transcript_path,
+                "--session", session_id,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(ROOT),
+            start_new_session=True,
+        )
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
