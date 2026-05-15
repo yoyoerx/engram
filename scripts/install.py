@@ -55,23 +55,26 @@ CLAUDE_MD_BLOCK = """\
 Engram is a hybrid RAG memory backend (Qdrant + Neo4j) available as an MCP server.
 Use it instead of writing flat .md files to the memory directory.
 
-**Saving memories:**
-- Call `store_memory` whenever you learn something worth remembering.
-- Choose the correct `memory_type`: `feedback`, `user`, `project`, `reference`, `decision`, or `error`.
-- Set `project` to the relevant project name when the memory is project-scoped; omit for global memories.
-- Do NOT write .md files to the memory directory -- Engram replaces that system.
+**Retrieval is automatic** -- the UserPromptSubmit hook injects relevant memories before
+every prompt. You do not need to call retrieve_context at session start.
+
+**Saving memories -- in-session storage still matters:**
+The Stop hook batch-extracts memories from the transcript after each session, but it is a
+safety net, not a substitute. Call store_memory immediately when any of the following occurs:
+- User corrects your approach or confirms a non-obvious one worked (memory_type: feedback)
+- You learn anything about the user's role, preferences, or expertise (memory_type: user)
+- A project decision is made or rationale becomes clear (memory_type: decision)
+- A bug pattern or workaround is discovered (memory_type: error)
+- A useful external resource or location is identified (memory_type: reference)
+- A significant task completes (memory_type: project)
+
+Choose the correct memory_type: feedback, user, project, reference, decision, or error.
+Set project to the relevant project name when memory is project-scoped; omit for global.
+Do NOT write .md files to the memory directory -- Engram replaces that system.
 
 **Recalling context:**
-- Call `retrieve_context` at the start of any session where prior work is relevant.
-- Use `list_memories` to browse what is stored when orientation is needed.
-- Use `get_related` to explore entity relationships in the knowledge graph.
-
-**Proactive memory -- store as you learn:**
-- User corrects your approach or confirms a non-obvious one worked (`memory_type: feedback`)
-- You learn a new fact about the user's role, preferences, or expertise (`memory_type: user`)
-- A project decision is made or rationale becomes clear (`memory_type: project` or `decision`)
-- A bug pattern or workaround is discovered that could recur (`memory_type: error`)
-- A useful external resource or location is identified (`memory_type: reference`)
+- Use list_memories to browse what is stored when orientation is needed.
+- Use get_related to explore entity relationships in the knowledge graph.
 """
 
 # ---------------------------------------------------------------------------
