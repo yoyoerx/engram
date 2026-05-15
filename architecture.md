@@ -423,7 +423,6 @@ engram/
 │   ├── session_cache.py         # Per-session state: query hashes, seen chunk_ids, exchange counter
 │   ├── engram_config.py         # Shared config loader: global + per-project + env var merge
 │   ├── configure.py             # Config CLI: show / set / hooks install / hooks status
-│   ├── smoke_retrieve.py        # Quick retrieval sanity check
 │   └── benchmark.py             # Latency benchmark — reports p50/p95/p99 for retrieve_context
 │
 │   Per-project override (in any project root, optional):
