@@ -512,9 +512,9 @@ engram/
 **Limitation:** Docker Desktop itself (the GUI app on Windows) cannot be started programmatically from a hook; it must be running before the session opens. The hook handles everything downstream of that.
 **Trade-off:** Adds ~2–5 seconds to session startup when services are cold. Negligible when services are already running.
 
-### ADR-015: PreCompact hook removed
-**Decision:** PreCompact hook (`scripts/pre_compact.py`) was wired in an earlier iteration and has been removed from `~/.claude/settings.json`.
-**Rationale:** PreCompact `command` hooks fire and complete before Claude has a response turn. The `systemMessage` output is consumed as part of the compaction input — there is no opportunity for Claude to call `store_memory` in response before the compaction completes. In practice the hook ran, printed a warning, and the warning was immediately folded into the summary with no effect. The Stop hook (ADR-014 / `stop_hook.py`) already provides proactive nudging after every response while Claude still has an action window; that is the correct mechanism. The PreCompact script (`scripts/pre_compact.py`) is retained in the repo for reference but is no longer wired.
+### ADR-015: PreCompact hook repurposed — memory capture, not Claude action
+**Decision:** The original `scripts/pre_compact.py` (which printed a warning asking Claude to save memories) was removed. A new `scripts/compact_hook.py` is wired in its place with a completely different purpose.
+**Rationale:** The original hook assumed Claude could call `store_memory` in response to a `systemMessage` before compaction completed. That is wrong — `command` hooks fire and complete before Claude has a response turn. The `systemMessage` output is folded into the compaction input with no action window. The replacement (`compact_hook.py`) does two things that do not require Claude's cooperation: (1) spawns `auto_store.py` as a detached background process to extract and store memories from the transcript before context is summarized away — the highest-value extraction moment in a long session; (2) clears `seen_chunk_ids` from the session cache so the next `UserPromptSubmit` re-injects relevant memories into the fresh post-compaction window. Both actions complete without Claude involvement and within the hook timeout.
 
 ---
 
@@ -692,9 +692,8 @@ python scripts/configure.py hooks status
 ### Operational Hardening (post-Phase 7) ✅
 - [x] `scripts/start.py` — idempotent cold-start; starts Docker Compose services, checks/starts Ollama, runs health check. Flags: `--wait`, `--health-only`.
 - [x] `scripts/session_start.py` — SessionStart hook; fires automatically on every Claude Code session open, starts services, outputs status banner (ADR-014).
-- [x] `scripts/stop_hook.py` — Stop hook; fires after every response, nudges `store_memory` if >15 min idle, stronger warning if >30 min.
-- [x] `scripts/pre_compact.py` — PreCompact hook; script retained in repo but **removed from settings.json** (ADR-015: fires with no action window for Claude to respond before compaction completes).
-- [x] `~/.claude/CLAUDE.md` — strengthened: `retrieve_context` at session start is mandatory; `store_memory` after task completions and at pause points; "err on the side of storing" documented.
+- [x] `scripts/stop_hook.py` — Stop hook; original version nudged Claude to call `store_memory` after idle turns. Replaced in Phase 8C with a thin launcher that spawns `auto_store.py` as a detached background process.
+- [x] `~/.claude/CLAUDE.md` — strengthened: `store_memory` after task completions and at pause points; "err on the side of storing" documented. Session-start `retrieve_context` call removed in Phase 8 (hooks handle retrieval automatically).
 - [x] `~/.claude/settings.json` — SessionStart and Stop hooks configured.
 - [x] `list_memories` tombstone filter fixed (OQ-7) — `FieldCondition` was guarded by `if False` debug artifact; tombstoned memories now correctly excluded from list output.
 

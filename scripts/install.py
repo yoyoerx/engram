@@ -5,15 +5,16 @@ Usage:
     python scripts/install.py [--skip-mcp] [--skip-claude-md] [--non-interactive]
 
 Steps:
-    1. Check prerequisites (Docker, Ollama, Python, Claude Code CLI)
-    2. Create .env from .env.example if missing (prompts for secrets)
-    3. Install Python package in editable mode (pip install -e .)
-    4. Start Docker services (docker compose up -d)
-    5. Pull Ollama embedding model
-    6. Run init_db.py (create Qdrant collection + Neo4j schema)
-    7. Register Engram MCP server with Claude Code
-    8. Add MCP tool permissions to ~/.claude/settings.json
-    9. Merge memory routing instructions into ~/.claude/CLAUDE.md
+    1.  Check prerequisites (Docker, Ollama, Python, Claude Code CLI)
+    2.  Create .env from .env.example if missing (prompts for secrets)
+    3.  Install Python package in editable mode (pip install -e .)
+    4.  Start Docker services (docker compose up -d)
+    5.  Pull Ollama embedding model
+    6.  Run init_db.py (create Qdrant collection + Neo4j schema)
+    7.  Register Engram MCP server with Claude Code
+    8.  Add MCP tool permissions to ~/.claude/settings.json
+    9.  Install Claude Code lifecycle hooks (SessionStart, UserPromptSubmit, Stop, PreCompact)
+    10. Merge memory routing instructions into ~/.claude/CLAUDE.md
 """
 
 import argparse
@@ -114,7 +115,7 @@ def _prompt(question: str, default: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 def check_prerequisites() -> bool:
-    _header("Step 1 of 9: Checking prerequisites")
+    _header("Step 1 of 10: Checking prerequisites")
     all_ok = True
 
     # Python version
@@ -167,7 +168,7 @@ def check_prerequisites() -> bool:
 # ---------------------------------------------------------------------------
 
 def setup_env(non_interactive: bool) -> bool:
-    _header("Step 2 of 9: Environment configuration (.env)")
+    _header("Step 2 of 10: Environment configuration (.env)")
 
     if ENV_FILE.exists():
         _ok(".env already exists -- skipping")
@@ -222,7 +223,7 @@ def _patch_docker_compose(password: str) -> None:
 # ---------------------------------------------------------------------------
 
 def install_package() -> bool:
-    _header("Step 3 of 9: Installing engram_mcp package (pip install -e .)")
+    _header("Step 3 of 10: Installing engram_mcp package (pip install -e .)")
     result = _run([sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"], cwd=ROOT)
     if result.returncode == 0:
         _ok("engram_mcp installed in editable mode")
@@ -237,7 +238,7 @@ def install_package() -> bool:
 # ---------------------------------------------------------------------------
 
 def start_docker_services() -> bool:
-    _header("Step 4 of 9: Starting Docker services (Qdrant + Neo4j)")
+    _header("Step 4 of 10: Starting Docker services (Qdrant + Neo4j)")
     result = _run(["docker", "compose", "up", "-d"], cwd=ROOT)
     if result.returncode == 0:
         _ok("Docker services started")
@@ -254,7 +255,7 @@ def start_docker_services() -> bool:
 # ---------------------------------------------------------------------------
 
 def pull_ollama_model() -> bool:
-    _header("Step 5 of 9: Pulling nomic-embed-text embedding model")
+    _header("Step 5 of 10: Pulling nomic-embed-text embedding model")
 
     # Check if already present
     result = _run(["ollama", "list"])
@@ -276,7 +277,7 @@ def pull_ollama_model() -> bool:
 # ---------------------------------------------------------------------------
 
 def init_db() -> bool:
-    _header("Step 6 of 9: Initialising databases (Qdrant collection + Neo4j schema)")
+    _header("Step 6 of 10: Initialising databases (Qdrant collection + Neo4j schema)")
     _info("Waiting a moment for services to be ready...")
 
     import time
@@ -305,7 +306,7 @@ def init_db() -> bool:
 # ---------------------------------------------------------------------------
 
 def register_mcp_server() -> bool:
-    _header("Step 7 of 9: Registering Engram MCP server with Claude Code")
+    _header("Step 7 of 10: Registering Engram MCP server with Claude Code")
 
     # Check if already registered
     result = _run(["claude", "mcp", "list"])
@@ -336,7 +337,7 @@ def register_mcp_server() -> bool:
 # ---------------------------------------------------------------------------
 
 def update_settings_permissions() -> bool:
-    _header("Step 8 of 9: Adding MCP tool permissions to ~/.claude/settings.json")
+    _header("Step 8 of 10: Adding MCP tool permissions to ~/.claude/settings.json")
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
 
     settings: dict = {}
@@ -370,8 +371,25 @@ def update_settings_permissions() -> bool:
 # Step 9: CLAUDE.md
 # ---------------------------------------------------------------------------
 
+def install_hooks() -> bool:
+    _header("Step 9 of 10: Installing Claude Code lifecycle hooks")
+    result = _run(
+        [sys.executable, str(ROOT / "scripts" / "configure.py"), "hooks", "install"],
+        cwd=ROOT,
+    )
+    if result.returncode == 0:
+        _ok("Hooks installed (SessionStart, UserPromptSubmit, Stop, PreCompact)")
+        for line in result.stdout.strip().splitlines():
+            if line.strip():
+                _info(line.strip())
+        return True
+    _fail("hooks install failed")
+    _info(result.stderr[:500])
+    return False
+
+
 def update_claude_md() -> bool:
-    _header("Step 9 of 9: Merging memory instructions into ~/.claude/CLAUDE.md")
+    _header("Step 10 of 10: Merging memory instructions into ~/.claude/CLAUDE.md")
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
 
     marker = "## Memory -- use Engram"
@@ -417,12 +435,13 @@ def main() -> None:
     ]
 
     if not args.skip_mcp:
-        steps.append(("MCP registration",   register_mcp_server))
+        steps.append(("MCP registration",    register_mcp_server))
 
-    steps.append(("Settings permissions", update_settings_permissions))
+    steps.append(("Settings permissions",  update_settings_permissions))
+    steps.append(("Hooks install",         install_hooks))
 
     if not args.skip_claude_md:
-        steps.append(("CLAUDE.md",          update_claude_md))
+        steps.append(("CLAUDE.md",           update_claude_md))
 
     failures = []
     for name, fn in steps:

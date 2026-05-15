@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# Per-project Engram config (machine-specific, not for version control)
+.engram.json
+
 # Local Claude Code settings (machine-specific)
 .claude/
 
