@@ -8,7 +8,7 @@ This document is the living architectural record for **Engram**, a local-first h
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
 **Status:** Phase 9 Complete — Configuration System
-**Last Updated:** 2026-05-14
+**Last Updated:** 2026-05-16
 
 ---
 
@@ -704,6 +704,7 @@ Autonomous, invisible memory operations modeled on human memory consolidation. M
 - [x] `scripts/session_cache.py` — per-session state in `~/.engram/sessions/{session_id}.json`; tracks query hashes (ring buffer, last 20) and seen chunk_ids (cap 200) to prevent redundant injections.
 - [x] Query enriched with detected project name from `cwd` basename for improved graph traversal.
 - [x] Graceful degradation: any exception → silent exit, hook never blocks or errors a session.
+- [x] **Bug fix (2026-05-16):** `_detect_project` was incorrectly climbing to the username component when `cwd` was the Projects root (e.g., `C:\Users\Kevin\Projects` → climbed to "Kevin" → `project="Kevin"` → 0 Qdrant results → no injection). Fixed by guarding against paths where the grandparent is "Users" (climb-up case) or the parent is "Users" (base case). Also extracted skip-names into a module-level `_SKIP_NAMES` constant. Two new test cases added: `test_detect_project_projects_root_returns_none`, `test_detect_project_username_dir_returns_none`.
 
 **Phase 8B — Session-Count Decay**
 - [x] `scripts/session_start.py` — increments global `session_count` in `~/.engram/stats.json` on each session open.

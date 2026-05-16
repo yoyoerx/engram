@@ -38,20 +38,30 @@ except ImportError:
     pass
 
 
+_SKIP_NAMES = {"projects", "src", "code", "work", "dev", "home", "users"}
+
+
 def _detect_project(cwd: str) -> str | None:
     """Infer project name from working directory basename."""
     if not cwd:
         return None
     p = Path(cwd)
     name = p.name
-    # Skip generic names that aren't real project identifiers
-    if name.lower() in {"projects", "src", "code", "work", "dev", "home", "users"}:
-        # Try one level up
-        parent = p.parent.name
-        if parent.lower() not in {"projects", "src", "code", "work", "dev", "home", "users", ""}:
-            return parent
+    if name.lower() not in _SKIP_NAMES:
+        # Guard: don't return a bare username (C:/Users/Kevin)
+        if p.parent.name.lower() == "users":
+            return None
+        return name if name else None
+    # Try one level up, but guard against climbing into a username
+    # (e.g. C:/Users/Kevin/Projects -> parent="Kevin", grandparent="Users" -> skip)
+    parent_path = p.parent
+    parent = parent_path.name
+    grandparent = parent_path.parent.name
+    if grandparent.lower() == "users":
         return None
-    return name if name else None
+    if parent.lower() not in _SKIP_NAMES and parent:
+        return parent
+    return None
 
 
 def _query_hash(query: str) -> str:

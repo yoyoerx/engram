@@ -43,6 +43,16 @@ def test_detect_project_generic_returns_none():
     assert _detect_project(r"C:\projects\src") is None
 
 
+def test_detect_project_projects_root_returns_none():
+    # cwd is the Projects root — "Projects" is generic, parent "Kevin" is a username
+    assert _detect_project(r"C:\Users\Kevin\Projects") is None
+
+
+def test_detect_project_username_dir_returns_none():
+    # cwd is the user's home dir — parent is "Users", so it's a username, not a project
+    assert _detect_project(r"C:\Users\Kevin") is None
+
+
 # ── _query_hash ────────────────────────────────────────────────────────────────
 
 def test_query_hash_is_deterministic():
