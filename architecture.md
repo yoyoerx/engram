@@ -8,7 +8,7 @@ This document is the living architectural record for **Engram**, a local-first h
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
 **Status:** Phase 9 Complete — Configuration System
-**Last Updated:** 2026-05-16
+**Last Updated:** 2026-05-16 (two bug fixes)
 
 ---
 
@@ -715,6 +715,7 @@ Autonomous, invisible memory operations modeled on human memory consolidation. M
 **Phase 8C — Auto-Storage at Session End**
 - [x] `scripts/stop_hook.py` — rewritten as a thin launcher; spawns `auto_store.py` as a detached background process (`start_new_session=True`) and exits immediately; no blocking, no timeout risk.
 - [x] `scripts/auto_store.py` — async background extraction agent; reads session transcript JSONL, calls Claude Haiku to extract memories worth keeping (decisions, errors, feedback, project notes, references), calls `store_memory` directly for each candidate; logs to `~/.engram/logs/auto_store.log`; deduplicates within run; exits silently on any error.
+- [x] **Bug fix (2026-05-16):** Haiku occasionally returns trailing text after the JSON array (e.g., `[]\nNothing notable.`), causing `json.loads()` to raise `Extra data`. Replaced `json.loads()` with `json.JSONDecoder().raw_decode()` via a dedicated `_parse_haiku_response()` helper that: strips markdown fences, finds the first `[`, parses only the first valid JSON value (ignoring trailing content), and returns `[]` on any non-list result. 9 unit tests added in `tests/test_auto_store.py`.
 
 **Phase 8D — Mid-Session Storage (incremental auto-store)**
 - [x] `scripts/stop_hook.py` — throttled: spawns `auto_store.py` every N exchanges (configurable, default 5) rather than every response; saves `transcript_path` and `cwd` to session cache for downstream use.

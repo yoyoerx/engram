@@ -116,6 +116,24 @@ def _build_transcript_text(messages: list[dict]) -> str:
     return full
 
 
+def _parse_haiku_response(text: str) -> list[dict]:
+    """Extract a JSON array from Haiku's response, tolerating fences and trailing text."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        inner = []
+        for line in lines[1:]:
+            if line.startswith("```"):
+                break
+            inner.append(line)
+        text = "\n".join(inner).strip()
+    start = text.find("[")
+    if start == -1:
+        return []
+    result, _ = json.JSONDecoder().raw_decode(text, start)
+    return result if isinstance(result, list) else []
+
+
 def _call_haiku(transcript_text: str) -> list[dict]:
     """Call Claude Haiku synchronously to extract memory candidates."""
     import anthropic
@@ -132,11 +150,7 @@ def _call_haiku(transcript_text: str) -> list[dict]:
             }
         ],
     )
-    text = msg.content[0].text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
-    return json.loads(text)
+    return _parse_haiku_response(msg.content[0].text)
 
 
 def _content_hash(content: str) -> str:
