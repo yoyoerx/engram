@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -134,23 +135,31 @@ def _parse_haiku_response(text: str) -> list[dict]:
     return result if isinstance(result, list) else []
 
 
-def _call_haiku(transcript_text: str) -> list[dict]:
+def _call_haiku(transcript_text: str, log: logging.Logger | None = None) -> list[dict]:
     """Call Claude Haiku synchronously to extract memory candidates."""
     import anthropic
     import os
 
+    sys.path.insert(0, str(ROOT))
+    from engram_mcp.retry import call_with_retry_sync
+
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-    msg = client.messages.create(
+    msg = call_with_retry_sync(
+        client.messages.create,
         model=_EXTRACT_MODEL,
         max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": _EXTRACTION_PROMPT + transcript_text,
-            }
-        ],
+        messages=[{"role": "user", "content": _EXTRACTION_PROMPT + transcript_text}],
+        max_attempts=3,
+        base_delay=1.0,
+        backoff=2.0,
     )
-    return _parse_haiku_response(msg.content[0].text)
+    raw_text = msg.content[0].text
+    try:
+        return _parse_haiku_response(raw_text)
+    except Exception as exc:
+        if log:
+            log.error("_parse_haiku_response failed: %s | raw=%r", exc, raw_text[:200])
+        raise
 
 
 def _content_hash(content: str) -> str:
@@ -243,9 +252,9 @@ def main() -> None:
     transcript_text = _build_transcript_text(new_messages)
 
     try:
-        candidates = _call_haiku(transcript_text)
+        candidates = _call_haiku(transcript_text, log)
     except Exception as exc:
-        log.error("Haiku extraction failed: %s", exc)
+        log.error("Haiku extraction failed: %s\n%s", exc, traceback.format_exc())
         return
 
     if not isinstance(candidates, list) or not candidates:

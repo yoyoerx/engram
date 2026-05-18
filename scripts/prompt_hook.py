@@ -147,7 +147,7 @@ def main() -> None:
 
     if has_seen_query(cache, q_hash):
         save_cache(session_id, cache)
-        return  # identical query this session — skip
+        return
 
     try:
         memories = asyncio.run(_retrieve(enriched_query, project, config.get("retrieve_limit", 5)))

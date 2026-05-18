@@ -20,6 +20,11 @@ _TRANSIENT_HTTP = (
     "ReadTimeout",
     "ConnectTimeout",
     "TimeoutException",
+    "JSONDecodeError",   # SDK-level malformed HTTP response body
+    "InternalServerError",
+    "APIStatusError",
+    "APIConnectionError",
+    "APITimeoutError",
 )
 
 _TRANSIENT_NEO4J = (

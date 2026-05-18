@@ -7,8 +7,8 @@ This document is the living architectural record for **Engram**, a local-first h
 **Repository:** https://github.com/yoyoerx/engram
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
-**Status:** Phase 9 Complete — Configuration System
-**Last Updated:** 2026-05-16 (two bug fixes)
+**Status:** Phase 9 Complete — Hooks Verified in Production
+**Last Updated:** 2026-05-18
 
 ---
 
@@ -577,6 +577,8 @@ python scripts/configure.py hooks install
 
 All paths must use forward slashes on Windows (backslashes are stripped by the hook runner).
 
+> **Note — systemMessage is invisible by design:** The `systemMessage` output from `UserPromptSubmit` hooks is injected into Claude's system prompt silently. It does **not** appear in the Claude Code UI or conversation view. Claude receives and reads the injected memories, but the injection is not visible in the chat. Hook behavior has been verified in production (see Phase 8A).
+
 ### Configuration
 
 Engram hook behavior is controlled by a two-tier JSON config system:
@@ -705,6 +707,7 @@ Autonomous, invisible memory operations modeled on human memory consolidation. M
 - [x] Query enriched with detected project name from `cwd` basename for improved graph traversal.
 - [x] Graceful degradation: any exception → silent exit, hook never blocks or errors a session.
 - [x] **Bug fix (2026-05-16):** `_detect_project` was incorrectly climbing to the username component when `cwd` was the Projects root (e.g., `C:\Users\Kevin\Projects` → climbed to "Kevin" → `project="Kevin"` → 0 Qdrant results → no injection). Fixed by guarding against paths where the grandparent is "Users" (climb-up case) or the parent is "Users" (base case). Also extracted skip-names into a module-level `_SKIP_NAMES` constant. Two new test cases added: `test_detect_project_projects_root_returns_none`, `test_detect_project_username_dir_returns_none`.
+- [x] **Hook verification (2026-05-17–18):** Temporary debug logging was added to `prompt_hook.py` and `session_start.py` to confirm hooks fire correctly end-to-end. Verified in production: 40 successful memory injections, 0 errors across 8 session starts. Logging removed after verification. The `systemMessage` output from hooks is invisible in the Claude Code UI by design — Claude receives it silently.
 
 **Phase 8B — Session-Count Decay**
 - [x] `scripts/session_start.py` — increments global `session_count` in `~/.engram/stats.json` on each session open.
@@ -776,6 +779,7 @@ Post-migration: Claude Code can be configured to prefer `retrieve_context` over 
 | OQ-5 | How should the 60/40 vector/graph weight be calibrated? Manual tuning or learned? | **Resolved — manual v1** (tunable in `config.py`). ML calibration deferred to v2. |
 | OQ-6 | Should Neo4j entities be deduplicated by canonical name, or is entity disambiguation needed? | **Resolved — name-based dedup for v1.** `MERGE` on `toLower(name)` in Cypher. |
 | OQ-7 | What's the right tombstone filtering strategy for list_memories vs retrieve_context? | **Resolved** — `list_memories` now filters tombstoned records (same as `retrieve_context`). Bug was `if False` guard on the tombstone `FieldCondition` in `manage.py`. |
+| OQ-8 | Are UserPromptSubmit hooks actually firing in the VS Code extension? | **Resolved** — confirmed in production: 40 successful memory injections, 0 errors, 8 session starts verified. `systemMessage` output is invisible in the UI by design — Claude receives it silently. |
 
 ---
 
