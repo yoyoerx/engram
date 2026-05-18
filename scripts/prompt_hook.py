@@ -9,6 +9,9 @@ so Claude has long-term context before processing the user's request.
 
 Design:
 - Enriches the query with the detected project name for better graph traversal
+- Thin-prompt detection: when the user sends a short or affirmation message
+  ("yes", "ok", "go ahead", etc.), the last assistant turn is prepended to the
+  retrieval query so relevant memories are found from context, not just "yes".
 - Session deduplication: skips retrieval if identical query seen this session
 - Filters chunk_ids already returned this session to avoid redundant injection
 - Gracefully degrades on any error (services down, import failure, etc.)
@@ -39,6 +42,62 @@ except ImportError:
 
 
 _SKIP_NAMES = {"projects", "src", "code", "work", "dev", "home", "users"}
+
+# Prompts shorter than this character count trigger last-assistant-turn enrichment
+_THIN_PROMPT_CHARS = 60
+
+# Affirmations that are semantically empty on their own
+_AFFIRMATIONS = {
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "alright",
+    "go", "go ahead", "proceed", "do it", "sounds good", "looks good",
+    "great", "perfect", "exactly", "correct", "right", "agreed",
+    "please", "please do", "yes please", "do that", "let's do it",
+    "continue", "keep going", "carry on", "makes sense",
+}
+
+
+def _is_thin_prompt(prompt: str) -> bool:
+    """Return True when the prompt is too sparse to drive a useful retrieval query."""
+    if len(prompt) <= _THIN_PROMPT_CHARS:
+        return True
+    return prompt.strip().lower() in _AFFIRMATIONS
+
+
+def _last_assistant_text(transcript_path: str, max_chars: int = 600) -> str | None:
+    """Read the transcript and return the text of the last assistant turn, truncated."""
+    if not transcript_path:
+        return None
+    try:
+        lines = Path(transcript_path).read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+
+    last_text = None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            role = entry.get("role") or entry.get("type", "")
+            if role != "assistant":
+                continue
+            content = entry.get("content", "")
+            if isinstance(content, list):
+                parts = [
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                content = " ".join(parts)
+            text = str(content).strip()
+            if text:
+                last_text = text
+        except Exception:
+            continue
+
+    if not last_text:
+        return None
+    return last_text[:max_chars]
 
 
 def _detect_project(cwd: str) -> str | None:
@@ -129,10 +188,6 @@ def main() -> None:
     if not config.get("auto_retrieve", True):
         return
 
-    project = _detect_project(cwd)
-    enriched_query = f"In project {project}: {prompt}" if project else prompt
-    q_hash = _query_hash(enriched_query)
-
     try:
         from scripts.session_cache import load_cache, save_cache, has_seen_query, record_query
     except ImportError:
@@ -144,6 +199,19 @@ def main() -> None:
     # Save cwd so stop_hook can load per-project config without receiving cwd itself
     if cwd:
         cache["cwd"] = cwd
+
+    project = _detect_project(cwd)
+
+    # When the user's message is thin (short or a bare affirmation), fold in
+    # the last assistant turn so retrieval has real context to work with.
+    query_text = prompt
+    if _is_thin_prompt(prompt):
+        assistant_context = _last_assistant_text(cache.get("transcript_path", ""))
+        if assistant_context:
+            query_text = f"{assistant_context} {prompt}"
+
+    enriched_query = f"In project {project}: {query_text}" if project else query_text
+    q_hash = _query_hash(enriched_query)
 
     if has_seen_query(cache, q_hash):
         save_cache(session_id, cache)
