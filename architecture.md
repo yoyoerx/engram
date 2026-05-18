@@ -7,7 +7,7 @@ This document is the living architectural record for **Engram**, a local-first h
 **Repository:** https://github.com/yoyoerx/engram
 **Inspired by:** [The AI Amnesia Problem](https://medium.com/@yoyoerx/the-ai-amnesia-problem-architecting-long-term-memory-for-local-llms-cbe3d5c6c93e)
 **Author:** [@yoyoerx](https://medium.com/@yoyoerx)
-**Status:** Phase 9 Complete — Hooks Verified in Production
+**Status:** Phase 10 Complete — Memory Maintenance
 **Last Updated:** 2026-05-18
 
 ---
@@ -423,6 +423,7 @@ engram/
 │   ├── session_cache.py         # Per-session state: query hashes, seen chunk_ids, exchange counter
 │   ├── engram_config.py         # Shared config loader: global + per-project + env var merge
 │   ├── configure.py             # Config CLI: show / set / hooks install / hooks status
+│   ├── maintain.py              # Memory maintenance: near-duplicate dedup sweep + stats
 │   └── benchmark.py             # Latency benchmark — reports p50/p95/p99 for retrieve_context
 │
 │   Per-project override (in any project root, optional):
@@ -729,6 +730,13 @@ Autonomous, invisible memory operations modeled on human memory consolidation. M
 **Tests**
 - [x] `tests/test_decay.py` — 8 unit tests for `_adjusted_score`: never-retrieved, stale (30 sessions), usage cap, no-coding-gap invariant, sessions_since clamped to 0.
 - [x] `tests/test_prompt_hook.py` — 25 unit tests for `_detect_project`, `_query_hash`, `_format_memories`, session cache load/save/dedup/ring-buffer, exchange counter, stored hash dedup, backward compat.
+
+### Phase 10 — Memory Maintenance ✅
+Near-duplicate dedup sweep to prune memories that have been stored multiple times (common after migration + repeated auto_store runs on similar content).
+
+- [x] `scripts/maintain.py` — CLI with two modes: `--stats` (collection summary by type, tombstone count) and dedup sweep (default). Scrolls all Qdrant points with vectors, runs ANN search for each non-tombstoned point, tombstones the older of any pair above the cosine similarity threshold (default 0.92). Both Qdrant payload and Neo4j node are marked `tombstone=true`; a `SUPERSEDES` edge is created in the graph. `--dry-run` previews without modifying. `--verbose` prints progress every 50 points.
+- [x] First run on production data: 107 duplicate pairs found at threshold 0.92, 92 unique memories tombstoned (15 were chain-deduplicated within the run). Active memory count reduced from 416 to 324.
+- [x] ASCII-safe output (non-ASCII characters in content previews replaced with `?` for Windows cp1252 console).
 
 ### Phase 9 — Configuration System ✅
 Two-tier configuration: global (`~/.engram/config.json`) and per-project (`{project}/.engram.json`), with environment variable overrides. Hooks consult the config at runtime so behavior can be tuned without touching code.

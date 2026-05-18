@@ -243,6 +243,7 @@ engram/
 │   ├── install.py               # One-command setup
 │   ├── init_db.py               # Qdrant collection + Neo4j schema
 │   ├── migrate.py               # Flat-file memory importer
+│   ├── maintain.py              # Memory maintenance: dedup sweep + collection stats
 │   ├── health_check.py          # Service liveness check
 │   ├── start.py                 # Cold-start: Docker + Ollama + health check
 │   └── benchmark.py             # Retrieval latency benchmark (p50/p95/p99)
@@ -290,6 +291,10 @@ pip install -e ".[dev]"
 python scripts/health_check.py    # verify all services are up
 pytest tests/ -v                  # run the test suite (65 tests)
 python scripts/benchmark.py       # retrieval latency (p50/p95/p99)
+python scripts/maintain.py --stats          # collection stats (memory count by type)
+python scripts/maintain.py --dry-run        # preview near-duplicate pairs
+python scripts/maintain.py                  # tombstone duplicates (default threshold: 0.92)
+python scripts/maintain.py --threshold 0.95 # stricter threshold
 ```
 
 ---
